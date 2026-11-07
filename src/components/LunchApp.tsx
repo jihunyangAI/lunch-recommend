@@ -36,6 +36,9 @@ function frameCircle(map: google.maps.Map, el: HTMLElement, center: LatLng, radi
   map.panBy(0, 10); // keep the circle centered in the part above the sheet
 }
 
+/** Today's shared search budget is used up (or the visitor searched too fast). */
+class QuotaError extends Error {}
+
 let mapsConfigured = false;
 function configureMaps() {
   if (mapsConfigured) return;
@@ -90,6 +93,8 @@ export default function LunchApp() {
   const [radius, setRadius] = useState<RadiusMeters>(DEFAULT_RADIUS);
   const radiusLabel = RADIUS_OPTIONS.find((o) => o.meters === radius)!.label;
   const [view, setView] = useState<View>("nearby");
+  /** App-wide searches today (all visitors). null when the counter isn't configured. */
+  const [quota, setQuota] = useState<{ used: number; limit: number } | null>(null);
   const [mapsReady, setMapsReady] = useState(false);
   const { favorites, isFavorite, toggle: toggleFavorite } = useFavorites();
 
@@ -228,6 +233,14 @@ export default function LunchApp() {
         if (viewRef.current === "nearby") frameCircle(map, mapDiv.current, position, radius);
         setMapsReady(true);
 
+        // Reserve one search from today's app-wide budget before calling Places.
+        const q = await fetch("/api/search-quota", { method: "POST" })
+          .then((r) => r.json() as Promise<{ enabled: boolean; allowed: boolean; used: number; limit: number; error?: string }>)
+          .catch(() => null);
+        if (cancelled) return;
+        if (q?.enabled) setQuota({ used: q.used, limit: q.limit });
+        if (q && !q.allowed) throw new QuotaError(q.error);
+
         const { places } = await Place.searchNearby({
           fields: [
             "id",
@@ -283,8 +296,13 @@ export default function LunchApp() {
         setStatus("error");
         // The Places daily quota is capped on purpose (to stay in the free tier).
         const msg = e instanceof Error ? e.message : String(e);
+        if (e instanceof QuotaError && e.message) {
+          setError(e.message);
+          return;
+        }
+        if (/RESOURCE_EXHAUSTED|quota|429/i.test(msg)) setQuota((p) => (p ? { ...p, used: p.limit } : p));
         setError(
-          /RESOURCE_EXHAUSTED|quota|429/i.test(msg)
+          e instanceof QuotaError || /RESOURCE_EXHAUSTED|quota|429/i.test(msg)
             ? "오늘 사용할 수 있는 식당 검색 횟수를 모두 썼어요. 한국 시간 오후 5시(서머타임 기간엔 4시)에 초기화돼요."
             : "주변 식당을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
         );
@@ -614,6 +632,26 @@ export default function LunchApp() {
               Tip. 지도를 움직인 뒤 <b className="font-semibold text-ink">이 지역에서 다시 검색</b>을 누르거나
               <span className="hidden sm:inline">, 지도에서 마우스 오른쪽 버튼을 눌러</span> 원하는 위치를 기준으로 조회할 수 있어요.
             </p>
+          )}
+
+          {quota && (
+            <div
+              className="mb-3 flex items-center gap-3 rounded-xl bg-white px-3 py-2 ring-1 ring-line"
+              title="모든 방문자의 오늘 식당 검색 횟수예요. 무료 사용량을 지키기 위해 하루 횟수를 제한하고 있어요."
+            >
+              <span className="shrink-0 text-xs font-semibold text-ink">오늘 전체 검색</span>
+              <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface">
+                <div
+                  className={`h-full rounded-full transition-all ${
+                    quota.used >= quota.limit ? "bg-coral-deep" : quota.used / quota.limit >= 0.8 ? "bg-coral" : "bg-coral/60"
+                  }`}
+                  style={{ width: `${Math.min(100, (quota.used / quota.limit) * 100)}%` }}
+                />
+              </div>
+              <span className="shrink-0 text-xs tabular-nums text-muted">
+                <b className={quota.used >= quota.limit ? "text-coral-deep" : "text-ink"}>{quota.used}</b> / {quota.limit}
+              </span>
+            </div>
           )}
 
           {/* AI box (recommends from nearby search results) */}
