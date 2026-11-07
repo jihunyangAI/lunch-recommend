@@ -281,7 +281,13 @@ export default function LunchApp() {
         if (cancelled) return;
         console.error(e);
         setStatus("error");
-        setError("주변 식당을 불러오지 못했어요. API 키의 허용 주소(현재 주소 포함 여부)와 Places API (New) 사용 설정을 확인해 주세요.");
+        // The Places daily quota is capped on purpose (to stay in the free tier).
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(
+          /RESOURCE_EXHAUSTED|quota|429/i.test(msg)
+            ? "오늘 사용할 수 있는 식당 검색 횟수를 모두 썼어요. 한국 시간 오후 5시(서머타임 기간엔 4시)에 초기화돼요."
+            : "주변 식당을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+        );
       }
     })();
 
