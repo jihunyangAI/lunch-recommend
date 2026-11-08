@@ -5,6 +5,7 @@ import { importLibrary, setOptions } from "@googlemaps/js-api-loader";
 import type { AiResult, PriceLevel, Restaurant } from "@/lib/types";
 import { distanceMeters, formatDistance, PRICE_TEXT, priceSteps, walkMinutes } from "@/lib/format";
 import { useFavorites } from "@/lib/favorites";
+import { currentTheme, setTheme, useTheme, type Theme } from "@/lib/theme";
 
 const API_KEY = process.env.NEXT_PUBLIC_MAPS_API_KEY ?? "";
 const MAP_ID = process.env.NEXT_PUBLIC_MAPS_MAP_ID || "DEMO_MAP_ID";
@@ -97,6 +98,61 @@ export default function LunchApp() {
   const [quota, setQuota] = useState<{ used: number; limit: number } | null>(null);
   const [mapsReady, setMapsReady] = useState(false);
   const { favorites, isFavorite, toggle: toggleFavorite } = useFavorites();
+  const theme = useTheme();
+  /** Color scheme the current Map instance was built with (it can't change after creation). */
+  const mapScheme = useRef<Theme | null>(null);
+
+  /** Build a Map on the container and register the app's listeners. Only touches refs and state setters. */
+  const createMap = useCallback((el: HTMLElement, center: LatLng, zoom: number, scheme: Theme) => {
+    const m = new google.maps.Map(el, {
+      center,
+      zoom,
+      mapId: MAP_ID,
+      colorScheme: scheme === "dark" ? google.maps.ColorScheme.DARK : google.maps.ColorScheme.LIGHT,
+      disableDefaultUI: true,
+      zoomControl: true,
+      clickableIcons: false,
+      gestureHandling: "greedy",
+    });
+    mapScheme.current = scheme;
+    // Right-click (or long-press on touch) → ask before searching there.
+    m.addListener("contextmenu", (e: google.maps.MapMouseEvent) => {
+      if (!e.latLng) return;
+      const rect = el.getBoundingClientRect();
+      const de = e.domEvent as Partial<MouseEvent>;
+      const x = typeof de.clientX === "number" ? de.clientX - rect.left : rect.width / 2;
+      const y = typeof de.clientY === "number" ? de.clientY - rect.top : rect.height / 2;
+      setPending({ lat: e.latLng.lat(), lng: e.latLng.lng(), x, y, w: rect.width });
+    });
+    // The prompt is pinned to screen pixels, so drop it once the map moves.
+    const dismiss = () => setPending(null);
+    m.addListener("click", dismiss);
+    m.addListener("dragstart", dismiss);
+    m.addListener("zoom_changed", dismiss);
+    // Touch-friendly alternative to right-click: once the map has been moved
+    // well away from the current search center, offer "search this area".
+    m.addListener("idle", () => {
+      const c = m.getCenter();
+      const { position: p, radius: r } = centerRef.current;
+      if (!c || !p || viewRef.current !== "nearby") return setMovedAway(false);
+      setMovedAway(distanceMeters(p, { lat: c.lat(), lng: c.lng() }) > Math.max(150, r * 0.4));
+    });
+    return m;
+  }, []);
+
+  // Theme toggled → rebuild the map in the new color scheme and move everything onto it.
+  // No new Places search happens here, so it doesn't use the daily quota.
+  useEffect(() => {
+    const old = mapRef.current;
+    if (!old || !mapDiv.current || mapScheme.current === theme) return;
+    const c = old.getCenter();
+    google.maps.event.clearInstanceListeners(old);
+    const m = createMap(mapDiv.current, c ? { lat: c.lat(), lng: c.lng() } : FALLBACK, old.getZoom() ?? 16, theme);
+    mapRef.current = m;
+    if (meMarker.current) meMarker.current.map = m;
+    circleRef.current?.setMap(m);
+    markers.current.forEach((mk) => (mk.map = m));
+  }, [theme, createMap]);
 
   const [mood, setMood] = useState("");
   const [ai, setAi] = useState<AiResult | null>(null);
@@ -151,7 +207,7 @@ export default function LunchApp() {
       try {
         configureMaps();
         setStatus("searching");
-        const [{ Map }, { AdvancedMarkerElement }, { Place, SearchNearbyRankPreference }] = await Promise.all([
+        const [, { AdvancedMarkerElement }, { Place, SearchNearbyRankPreference }] = await Promise.all([
           importLibrary("maps"),
           importLibrary("marker"),
           importLibrary("places"),
@@ -160,38 +216,7 @@ export default function LunchApp() {
         markerCtor.current = AdvancedMarkerElement;
 
         if (!mapRef.current) {
-          mapRef.current = new Map(mapDiv.current, {
-            center: position,
-            zoom: 16,
-            mapId: MAP_ID,
-            disableDefaultUI: true,
-            zoomControl: true,
-            clickableIcons: false,
-            gestureHandling: "greedy",
-          });
-          const m = mapRef.current;
-          // Right-click (or long-press on touch) → ask before searching there.
-          m.addListener("contextmenu", (e: google.maps.MapMouseEvent) => {
-            if (!e.latLng || !mapDiv.current) return;
-            const rect = mapDiv.current.getBoundingClientRect();
-            const de = e.domEvent as Partial<MouseEvent>;
-            const x = typeof de.clientX === "number" ? de.clientX - rect.left : rect.width / 2;
-            const y = typeof de.clientY === "number" ? de.clientY - rect.top : rect.height / 2;
-            setPending({ lat: e.latLng.lat(), lng: e.latLng.lng(), x, y, w: rect.width });
-          });
-          // The prompt is pinned to screen pixels, so drop it once the map moves.
-          const dismiss = () => setPending(null);
-          m.addListener("click", dismiss);
-          m.addListener("dragstart", dismiss);
-          m.addListener("zoom_changed", dismiss);
-          // Touch-friendly alternative to right-click: once the map has been moved
-          // well away from the current search center, offer "search this area".
-          m.addListener("idle", () => {
-            const c = m.getCenter();
-            const { position: p, radius: r } = centerRef.current;
-            if (!c || !p || viewRef.current !== "nearby") return setMovedAway(false);
-            setMovedAway(distanceMeters(p, { lat: c.lat(), lng: c.lng() }) > Math.max(150, r * 0.4));
-          });
+          mapRef.current = createMap(mapDiv.current, position, 16, currentTheme());
         } else {
           mapRef.current.panTo(position);
         }
@@ -312,7 +337,7 @@ export default function LunchApp() {
     return () => {
       cancelled = true;
     };
-  }, [position, radius, origin]);
+  }, [position, radius, origin, createMap]);
 
   useEffect(() => {
     centerRef.current = { position, radius };
@@ -460,7 +485,7 @@ export default function LunchApp() {
 
   if (!API_KEY) {
     return (
-      <p className="m-6 rounded-2xl bg-white p-4 text-sm text-coral-deep ring-1 ring-line">
+      <p className="m-6 rounded-2xl bg-card p-4 text-sm text-coral-deep ring-1 ring-line">
         NEXT_PUBLIC_MAPS_API_KEY가 설정되지 않았어요. .env.local을 확인하고 개발 서버를 다시 시작해 주세요.
       </p>
     );
@@ -473,7 +498,7 @@ export default function LunchApp() {
         <div
           ref={mapDiv}
           onContextMenu={(e) => e.preventDefault()}
-          className="h-full w-full bg-[#eceef1]"
+          className="h-full w-full bg-line"
           aria-label="주변 식당 지도 (마우스 오른쪽 클릭으로 조회 위치 지정)"
         />
 
@@ -487,7 +512,7 @@ export default function LunchApp() {
             <div
               role="dialog"
               aria-label="조회 위치 확인"
-              className="absolute z-30 w-[220px] rounded-2xl bg-white p-3.5 shadow-[0_12px_32px_rgba(20,20,30,0.18)] ring-1 ring-line"
+              className="absolute z-30 w-[220px] rounded-2xl bg-card p-3.5 shadow-[0_12px_32px_rgba(20,20,30,0.18)] ring-1 ring-line"
               style={{
                 // Prefer above the point; flip below when too close to the top. Clamp horizontally.
                 left: Math.min(Math.max(pending.x, 122), pending.w - 122),
@@ -521,31 +546,51 @@ export default function LunchApp() {
         )}
 
         <header className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-4">
-          <div className="pointer-events-auto rounded-2xl bg-white/95 px-4 py-2.5 shadow-[0_6px_24px_rgba(20,20,30,0.10)] backdrop-blur">
+          <div className="pointer-events-auto rounded-2xl bg-card/95 px-4 py-2.5 shadow-[0_6px_24px_rgba(20,20,30,0.10)] backdrop-blur">
             <h1 className="text-[17px] font-bold tracking-tight text-ink">
               오늘 뭐 먹지<span className="text-coral">?</span>
             </h1>
             <p className="text-[11px] font-medium text-muted">AI 맛집 추천</p>
           </div>
-          <button
-            type="button"
-            onClick={locate}
-            className="pointer-events-auto grid h-11 w-11 place-items-center rounded-full bg-white text-coral shadow-[0_6px_24px_rgba(20,20,30,0.12)] transition hover:scale-105 active:scale-95"
-            aria-label="현재 위치로 다시 검색"
-            title="현재 위치로 다시 검색"
-          >
-            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-              <circle cx="12" cy="12" r="3.5" />
-              <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
-            </svg>
-          </button>
+          <div className="pointer-events-auto flex gap-2">
+            <button
+              type="button"
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="grid h-11 w-11 place-items-center rounded-full bg-card text-ink shadow-[0_6px_24px_rgba(20,20,30,0.12)] transition hover:scale-105 active:scale-95"
+              aria-label={theme === "dark" ? "라이트 모드로 전환" : "다크 모드로 전환"}
+              title={theme === "dark" ? "라이트 모드" : "다크 모드"}
+            >
+              {theme === "dark" ? (
+                <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden>
+                  <circle cx="12" cy="12" r="4" />
+                  <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z" />
+                </svg>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={locate}
+              className="grid h-11 w-11 place-items-center rounded-full bg-card text-coral shadow-[0_6px_24px_rgba(20,20,30,0.12)] transition hover:scale-105 active:scale-95"
+              aria-label="현재 위치로 다시 검색"
+              title="현재 위치로 다시 검색"
+            >
+              <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                <circle cx="12" cy="12" r="3.5" />
+                <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+              </svg>
+            </button>
+          </div>
         </header>
 
         {/* Radius picker */}
         <div
           role="radiogroup"
           aria-label="검색 반경"
-          className="absolute left-4 top-[84px] flex gap-1 rounded-full bg-white/95 p-1 shadow-[0_6px_24px_rgba(20,20,30,0.10)] backdrop-blur"
+          className="absolute left-4 top-[84px] flex gap-1 rounded-full bg-card/95 p-1 shadow-[0_6px_24px_rgba(20,20,30,0.10)] backdrop-blur"
         >
           {RADIUS_OPTIONS.map((o) => {
             const on = o.meters === radius;
@@ -584,7 +629,7 @@ export default function LunchApp() {
           <button
             type="button"
             onClick={searchMapCenter}
-            className="absolute bottom-9 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full bg-ink px-4 py-2.5 text-[13px] font-semibold text-white shadow-[0_8px_24px_rgba(20,20,30,0.25)] transition hover:bg-black active:scale-95"
+            className="absolute bottom-9 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full bg-ink px-4 py-2.5 text-[13px] font-semibold text-card shadow-[0_8px_24px_rgba(20,20,30,0.25)] transition hover:opacity-90 active:scale-95"
           >
             <svg viewBox="0 0 24 24" className="h-4 w-4 text-coral" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />
@@ -594,8 +639,8 @@ export default function LunchApp() {
         )}
 
         {(status === "locating" || status === "searching") && (
-          <div className="absolute inset-0 grid place-items-center bg-white/40 backdrop-blur-[1px]">
-            <div className="flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-medium text-ink shadow">
+          <div className="absolute inset-0 grid place-items-center bg-card/40 backdrop-blur-[1px]">
+            <div className="flex items-center gap-2 rounded-full bg-card px-4 py-2 text-sm font-medium text-ink shadow">
               <span className="h-2 w-2 animate-ping rounded-full bg-coral" />
               {status === "locating" ? "현재 위치 확인 중…" : "주변 식당 찾는 중…"}
             </div>
@@ -609,7 +654,7 @@ export default function LunchApp() {
           <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-line" />
 
           {origin === "fallback" && (
-            <p className="mb-3 rounded-xl bg-white px-3 py-2 text-xs text-muted ring-1 ring-line">
+            <p className="mb-3 rounded-xl bg-card px-3 py-2 text-xs text-muted ring-1 ring-line">
               위치 권한이 없어 <b className="text-ink">서울시청</b> 기준으로 보여드려요. 브라우저에서 위치 권한을 허용하고 ⌖ 버튼을 눌러 주세요.
             </p>
           )}
@@ -621,7 +666,7 @@ export default function LunchApp() {
               <button
                 type="button"
                 onClick={locate}
-                className="shrink-0 rounded-full bg-white px-3 py-1 font-semibold text-coral ring-1 ring-coral/30 transition hover:bg-coral hover:text-white"
+                className="shrink-0 rounded-full bg-card px-3 py-1 font-semibold text-coral ring-1 ring-coral/30 transition hover:bg-coral hover:text-white"
               >
                 내 위치로
               </button>
@@ -636,7 +681,7 @@ export default function LunchApp() {
 
           {quota && (
             <div
-              className="mb-3 flex items-center gap-3 rounded-xl bg-white px-3 py-2 ring-1 ring-line"
+              className="mb-3 flex items-center gap-3 rounded-xl bg-card px-3 py-2 ring-1 ring-line"
               title="모든 방문자의 오늘 식당 검색 횟수예요. 무료 사용량을 지키기 위해 하루 횟수를 제한하고 있어요."
             >
               <span className="shrink-0 text-xs font-semibold text-ink">오늘 전체 검색</span>
@@ -656,7 +701,7 @@ export default function LunchApp() {
 
           {/* AI box (recommends from nearby search results) */}
           {view === "nearby" && (
-          <div className="mb-5 rounded-2xl bg-white p-4 ring-1 ring-line">
+          <div className="mb-5 rounded-2xl bg-card p-4 ring-1 ring-line">
             <div className="mb-2 flex items-center gap-2">
               <span className="rounded-md bg-coral-soft px-1.5 py-0.5 text-[11px] font-bold text-coral">AI</span>
               <p className="text-sm font-semibold text-ink">오늘 기분이나 먹고 싶은 걸 알려주세요</p>
@@ -673,7 +718,7 @@ export default function LunchApp() {
                 onChange={(e) => setMood(e.target.value)}
                 maxLength={100}
                 placeholder="예: 해장하고 싶어, 가볍게 혼밥, 만원 이하"
-                className="min-w-0 flex-1 rounded-xl bg-surface px-3.5 py-2.5 text-sm text-ink outline-none ring-1 ring-transparent placeholder:text-muted/70 focus:bg-white focus:ring-coral/50"
+                className="min-w-0 flex-1 rounded-xl bg-surface px-3.5 py-2.5 text-sm text-ink outline-none ring-1 ring-transparent placeholder:text-muted/70 focus:bg-card focus:ring-coral/50"
               />
               <button
                 type="submit"
@@ -754,7 +799,7 @@ export default function LunchApp() {
                   : "이 브라우저에 저장돼요 · 현재 위치에서 가까운 순 번호"}
               </p>
             </div>
-            <div className="flex rounded-full bg-white p-1 ring-1 ring-line">
+            <div className="flex rounded-full bg-card p-1 ring-1 ring-line">
               {(
                 [
                   ["distance", "거리순"],
@@ -766,7 +811,7 @@ export default function LunchApp() {
                   type="button"
                   onClick={() => setSort(key)}
                   className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
-                    sort === key ? "bg-ink text-white" : "text-muted hover:text-ink"
+                    sort === key ? "bg-ink text-card" : "text-muted hover:text-ink"
                   }`}
                 >
                   {label}
@@ -776,15 +821,15 @@ export default function LunchApp() {
           </div>
 
           {view === "nearby" && status === "error" && (
-            <p className="rounded-2xl bg-white p-4 text-sm text-coral-deep ring-1 ring-line">{error}</p>
+            <p className="rounded-2xl bg-card p-4 text-sm text-coral-deep ring-1 ring-line">{error}</p>
           )}
           {view === "nearby" && status === "ready" && restaurants.length === 0 && (
-            <p className="rounded-2xl bg-white p-6 text-center text-sm text-muted ring-1 ring-line">
+            <p className="rounded-2xl bg-card p-6 text-center text-sm text-muted ring-1 ring-line">
               {radiusLabel} 거리 안에서 식당을 찾지 못했어요. 반경을 넓혀 보세요.
             </p>
           )}
           {view === "favorites" && favorites.length === 0 && (
-            <div className="rounded-2xl bg-white px-6 py-10 text-center ring-1 ring-line">
+            <div className="rounded-2xl bg-card px-6 py-10 text-center ring-1 ring-line">
               <HeartIcon filled={false} className="mx-auto mb-3 h-8 w-8 text-coral/50" />
               <p className="text-sm font-semibold text-ink">아직 즐겨찾기한 식당이 없어요</p>
               <p className="mt-1 text-xs text-muted">주변 식당 카드의 하트를 눌러 자주 가는 곳을 모아 보세요.</p>
@@ -800,7 +845,7 @@ export default function LunchApp() {
           {view === "nearby" && (status === "locating" || status === "searching") && restaurants.length === 0 && (
             <div className="grid gap-3 md:grid-cols-2">
               {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="h-[108px] animate-pulse rounded-2xl bg-white ring-1 ring-line" />
+                <div key={i} className="h-[108px] animate-pulse rounded-2xl bg-card ring-1 ring-line" />
               ))}
             </div>
           )}
@@ -878,7 +923,7 @@ function RestaurantCard({
     <article
       ref={refCb}
       onClick={onSelect}
-      className={`group cursor-pointer rounded-2xl bg-white p-4 transition ${
+      className={`group cursor-pointer rounded-2xl bg-card p-4 transition ${
         active
           ? "ring-2 ring-coral shadow-[0_10px_30px_rgba(255,107,87,0.18)]"
           : "ring-1 ring-line hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(20,20,30,0.07)]"

@@ -4,6 +4,7 @@
   --color-coral: #ff6b57;
   --color-coral-deep: #e8513d;
   --color-coral-soft: #fff0ed;
+  --color-card: #ffffff;
   --color-surface: #f7f7f9;
   --color-line: #e9e9ee;
   --color-ink: #1d1d22;
@@ -12,9 +13,20 @@
     "Noto Sans KR", sans-serif;
 }
 
+/* Dark theme: same tokens, new values. Set on <html data-theme="dark"> by the toggle. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-coral-soft: #3a2521;
+  --color-card: #1c1d22;
+  --color-surface: #131418;
+  --color-line: #33343c;
+  --color-ink: #ececf1;
+  --color-muted: #9b9ba7;
+}
+
 html,
 body {
-  background: #ffffff;
+  background: var(--color-card);
   color: var(--color-ink);
   font-family: var(--font-sans);
   letter-spacing: -0.01em;
@@ -29,7 +41,7 @@ body {
   height: 28px;
   margin-bottom: 6px; /* room for the tail; marker anchors at bottom-center */
   border-radius: 9999px;
-  background: #ffffff;
+  background: var(--color-card);
   border: 2px solid var(--color-coral);
   box-shadow: 0 4px 12px rgba(29, 29, 34, 0.18);
   font: 700 12px/1 var(--font-sans);
@@ -69,7 +81,7 @@ body {
   margin-bottom: 9px;
   border-radius: 9999px;
   background: var(--color-ink);
-  border: 3px solid #ffffff;
+  border: 3px solid var(--color-card);
   box-shadow: 0 0 0 6px rgba(29, 29, 34, 0.15), 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 .origin-pin::after {
