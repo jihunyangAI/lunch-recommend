@@ -96,6 +96,11 @@ export default function LunchApp() {
   const [view, setView] = useState<View>("nearby");
   /** App-wide searches today (all visitors). null when the counter isn't configured. */
   const [quota, setQuota] = useState<{ used: number; limit: number } | null>(null);
+  /** Keyword typed in the search box, and the one the current results were searched with. */
+  const [keywordInput, setKeywordInput] = useState("");
+  const [keyword, setKeyword] = useState<string | null>(null);
+  /** Results already fetched this visit, so going back to them doesn't spend another search. */
+  const searchCache = useRef(new Map<string, Restaurant[]>());
   const [mapsReady, setMapsReady] = useState(false);
   const { favorites, isFavorite, toggle: toggleFavorite } = useFavorites();
   const theme = useTheme();
@@ -258,7 +263,19 @@ export default function LunchApp() {
         if (viewRef.current === "nearby") frameCircle(map, mapDiv.current, position, radius);
         setMapsReady(true);
 
+        const cacheKey = `${position.lat.toFixed(6)},${position.lng.toFixed(6)},${radius},${keyword ?? ""}`;
+        const cached = searchCache.current.get(cacheKey);
+        if (cached) {
+          setRestaurants(cached);
+          setSelectedId(null);
+          setAi(null);
+          setAiError(null);
+          setStatus("ready");
+          return;
+        }
+
         // Reserve one search from today's app-wide budget before calling Places.
+        // Nearby and keyword searches share this one budget.
         const q = await fetch("/api/search-quota", { method: "POST" })
           .then((r) => r.json() as Promise<{ enabled: boolean; allowed: boolean; used: number; limit: number; error?: string }>)
           .catch(() => null);
@@ -266,29 +283,51 @@ export default function LunchApp() {
         if (q?.enabled) setQuota({ used: q.used, limit: q.limit });
         if (q && !q.allowed) throw new QuotaError(q.error);
 
-        const { places } = await Place.searchNearby({
-          fields: [
-            "id",
-            "displayName",
-            "location",
-            "primaryTypeDisplayName",
-            "rating",
-            "userRatingCount",
-            "priceLevel",
-            "formattedAddress",
-            "googleMapsURI",
-          ],
-          locationRestriction: { center: position, radius },
-          includedTypes: ["restaurant"],
-          maxResultCount: 20,
-          rankPreference: SearchNearbyRankPreference.POPULARITY,
-          language: "ko",
-          region: "kr",
-        });
+        const fields = [
+          "id",
+          "displayName",
+          "location",
+          "primaryTypeDisplayName",
+          "rating",
+          "userRatingCount",
+          "priceLevel",
+          "formattedAddress",
+          "googleMapsURI",
+        ];
+        let places: google.maps.places.Place[];
+        if (keyword) {
+          // Text Search only takes a rectangle as a hard limit: use the circle's
+          // bounding box, then keep what's actually inside the circle below.
+          const dLat = radius / 111320;
+          const dLng = radius / (111320 * Math.cos((position.lat * Math.PI) / 180));
+          ({ places } = await Place.searchByText({
+            textQuery: keyword,
+            fields,
+            locationRestriction: {
+              south: position.lat - dLat,
+              north: position.lat + dLat,
+              west: position.lng - dLng,
+              east: position.lng + dLng,
+            },
+            maxResultCount: 20,
+            language: "ko",
+            region: "kr",
+          }));
+        } else {
+          ({ places } = await Place.searchNearby({
+            fields,
+            locationRestriction: { center: position, radius },
+            includedTypes: ["restaurant"],
+            maxResultCount: 20,
+            rankPreference: SearchNearbyRankPreference.POPULARITY,
+            language: "ko",
+            region: "kr",
+          }));
+        }
         if (cancelled) return;
 
         const list: Restaurant[] = places
-          .filter((p) => p.location)
+          .filter((p) => p.location && distanceMeters(position, { lat: p.location.lat(), lng: p.location.lng() }) <= radius)
           .map((p) => {
             const lat = p.location!.lat();
             const lng = p.location!.lng();
@@ -310,6 +349,7 @@ export default function LunchApp() {
           .sort((a, b) => a.distance - b.distance)
           .map((r, i) => ({ ...r, no: i + 1 }));
 
+        searchCache.current.set(cacheKey, list);
         setRestaurants(list);
         setSelectedId(null);
         setAi(null);
@@ -337,7 +377,7 @@ export default function LunchApp() {
     return () => {
       cancelled = true;
     };
-  }, [position, radius, origin, createMap]);
+  }, [position, radius, origin, keyword, createMap]);
 
   useEffect(() => {
     centerRef.current = { position, radius };
@@ -699,6 +739,62 @@ export default function LunchApp() {
             </div>
           )}
 
+          {/* Keyword search (name or food, e.g. 김밥) within the current radius */}
+          {view === "nearby" && (
+            <form
+              className="mb-3 flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const k = keywordInput.trim();
+                if (status === "locating" || status === "searching") return;
+                setSelectedId(null);
+                setKeyword(k || null);
+              }}
+            >
+              <div className="relative min-w-0 flex-1">
+                <svg viewBox="0 0 24 24" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden>
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-3.5-3.5" />
+                </svg>
+                <input
+                  type="search"
+                  value={keywordInput}
+                  onChange={(e) => setKeywordInput(e.target.value)}
+                  maxLength={40}
+                  placeholder="식당 이름이나 음식으로 찾기 (예: 김밥)"
+                  aria-label="식당 이름이나 음식으로 찾기"
+                  className="w-full rounded-xl bg-card py-2.5 pl-9 pr-3 text-sm text-ink outline-none ring-1 ring-line placeholder:text-muted/70 focus:ring-coral/50"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={status === "locating" || status === "searching"}
+                className="shrink-0 rounded-xl bg-ink px-4 text-sm font-semibold text-card transition hover:opacity-90 disabled:cursor-wait disabled:opacity-40"
+              >
+                찾기
+              </button>
+            </form>
+          )}
+          {view === "nearby" && keyword && (
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-coral-soft px-3 py-2 text-xs text-ink">
+              <span>
+                <b>&lsquo;{keyword}&rsquo;</b> 검색 결과예요 ({radiusLabel} 안).
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setKeywordInput("");
+                  setKeyword(null);
+                  setSelectedId(null);
+                }}
+                disabled={status === "locating" || status === "searching"}
+                className="shrink-0 rounded-full bg-card px-3 py-1 font-semibold text-coral ring-1 ring-coral/30 transition hover:bg-coral hover:text-white disabled:opacity-40"
+              >
+                전체 식당 보기
+              </button>
+            </div>
+          )}
+
           {/* AI box (recommends from nearby search results) */}
           {view === "nearby" && (
           <div className="mb-5 rounded-2xl bg-card p-4 ring-1 ring-line">
@@ -825,7 +921,8 @@ export default function LunchApp() {
           )}
           {view === "nearby" && status === "ready" && restaurants.length === 0 && (
             <p className="rounded-2xl bg-card p-6 text-center text-sm text-muted ring-1 ring-line">
-              {radiusLabel} 거리 안에서 식당을 찾지 못했어요. 반경을 넓혀 보세요.
+              {keyword ? `${radiusLabel} 거리 안에서 '${keyword}'에 맞는 곳을 찾지 못했어요.` : `${radiusLabel} 거리 안에서 식당을 찾지 못했어요.`}{" "}
+              반경을 넓혀 보세요.
             </p>
           )}
           {view === "favorites" && favorites.length === 0 && (
