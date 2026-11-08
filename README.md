@@ -25,6 +25,7 @@ npm run dev                  # http://localhost:3001
 | `NEXT_PUBLIC_MAPS_MAP_ID` | 브라우저 | JavaScript용 Map ID (Advanced Marker에 필요) |
 | `GEMINI_API_KEY` | 서버 전용 | https://aistudio.google.com/apikey |
 | `GEMINI_MODEL` | 서버 전용 | 기본 `gemini-3.5-flash-lite` |
+| `SITE_PASSWORD` | 서버 전용 | 사이트 접속 비밀번호 (Basic Auth, 아이디는 아무거나). **배포 시 필수** — 없으면 503. 로컬에서 비우면 비밀번호 없이 열림 |
 
 `NEXT_PUBLIC_*` 값은 빌드 시점에 번들에 들어가므로, 바꾸면 다시 배포해야 합니다.
 
